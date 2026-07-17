@@ -199,6 +199,7 @@ button:disabled { opacity: 0.42; cursor: not-allowed; }
 .field-section h3 span { color: #66617b; float: right; font-size: 8px; }
 .triple-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 8px; margin-top: 15px; }
+.input-commit-note { grid-column: 1 / -1; margin: 0; color: #77738d; font: 8px "Courier New", monospace; letter-spacing: .04em; }
 .number-field { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 .number-field > span:first-child { color: #85809b; font-size: 8px; letter-spacing: .04em; }
 .number-input-wrap { display: flex; align-items: center; min-width: 0; height: 32px; border: 1px solid rgba(117, 103, 165, .23); background: rgba(3, 2, 12, .66); }
