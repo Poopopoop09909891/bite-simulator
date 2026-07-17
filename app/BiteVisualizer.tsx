@@ -60,6 +60,34 @@ type SimResult = {
   physicsDuration: number;
 };
 
+type MetricSnapshot = {
+  rpm: number;
+  tipMps: number;
+  closingSpeed: number;
+  energy: number;
+  biteMm: number;
+  pathLength: number;
+};
+
+type ArmorSource =
+  | { kind: "demo" }
+  | { kind: "stl"; buffer: ArrayBuffer };
+
+type HistoryEntry = {
+  id: string;
+  createdAt: number;
+  config: WeaponConfig;
+  armorTransform: ArmorTransform;
+  armorName: string;
+  meshStatus: string;
+  armorSource: ArmorSource;
+  distanceOffset: number;
+  metrics: MetricSnapshot;
+  hit: boolean;
+};
+
+type MetricDeltas = Record<keyof MetricSnapshot, number>;
+
 type ThreeState = {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
@@ -96,6 +124,63 @@ const DEFAULT_ARMOR: ArmorTransform = { x: 20, y: 0, z: 0, rx: 0, ry: 0, rz: 0 }
 // weapon radius. Its glow supplies visibility without adding bulky geometry.
 const TOOTH_ROD_RADIUS = 0.25;
 const DEG = Math.PI / 180;
+const HISTORY_DB_NAME = "combat-robot-bite-visualizer";
+const HISTORY_STORE_NAME = "simulation-history";
+
+function openHistoryDatabase() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(HISTORY_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const database = request.result;
+      if (!database.objectStoreNames.contains(HISTORY_STORE_NAME)) {
+        database.createObjectStore(HISTORY_STORE_NAME, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function readSimulationHistory() {
+  const database = await openHistoryDatabase();
+  return new Promise<HistoryEntry[]>((resolve, reject) => {
+    const transaction = database.transaction(HISTORY_STORE_NAME, "readonly");
+    const request = transaction.objectStore(HISTORY_STORE_NAME).getAll();
+    request.onsuccess = () => resolve((request.result as HistoryEntry[]).sort((a, b) => b.createdAt - a.createdAt));
+    request.onerror = () => reject(request.error);
+    transaction.oncomplete = () => database.close();
+  });
+}
+
+async function writeHistoryEntry(entry: HistoryEntry) {
+  const database = await openHistoryDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(HISTORY_STORE_NAME, "readwrite");
+    transaction.objectStore(HISTORY_STORE_NAME).put(entry);
+    transaction.oncomplete = () => { database.close(); resolve(); };
+    transaction.onerror = () => { database.close(); reject(transaction.error); };
+  });
+}
+
+async function removeHistoryEntry(id: string) {
+  const database = await openHistoryDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(HISTORY_STORE_NAME, "readwrite");
+    transaction.objectStore(HISTORY_STORE_NAME).delete(id);
+    transaction.oncomplete = () => { database.close(); resolve(); };
+    transaction.onerror = () => { database.close(); reject(transaction.error); };
+  });
+}
+
+async function removeAllHistory() {
+  const database = await openHistoryDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction(HISTORY_STORE_NAME, "readwrite");
+    transaction.objectStore(HISTORY_STORE_NAME).clear();
+    transaction.oncomplete = () => { database.close(); resolve(); };
+    transaction.onerror = () => { database.close(); reject(transaction.error); };
+  });
+}
 
 // Accelerate repeated inside/outside tests on uploaded meshes.
 (THREE.Mesh.prototype as unknown as { raycast: typeof acceleratedRaycast }).raycast = acceleratedRaycast;
@@ -656,11 +741,22 @@ function NumberField({
   );
 }
 
-function Metric({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+function Metric({
+  label,
+  value,
+  delta,
+}: {
+  label: string;
+  value: string;
+  delta?: string | null;
+}) {
   return (
-    <div className={`metric ${accent ? "metric-accent" : ""}`}>
+    <div className={`metric ${label === "IMPACT PATH" ? "metric-accent" : ""}`}>
       <span>{label}</span>
-      <strong>{value}</strong>
+      <div className="metric-value">
+        <strong>{value}</strong>
+        {delta && <em className={delta.startsWith("+") ? "delta-up" : "delta-down"}>{delta}</em>}
+      </div>
     </div>
   );
 }
@@ -676,10 +772,15 @@ export default function Home() {
   const [result, setResult] = useState<SimResult | null>(null);
   const [status, setStatus] = useState("Position the scene, then arm the simulation.");
   const [distanceOffset, setDistanceOffset] = useState(0);
+  const [rightTab, setRightTab] = useState<"setup" | "history">("setup");
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [metricDeltas, setMetricDeltas] = useState<MetricDeltas | null>(null);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const threeRef = useRef<ThreeState | null>(null);
+  const armorSourceRef = useRef<ArmorSource>({ kind: "demo" });
+  const historyRef = useRef<HistoryEntry[]>([]);
   const configRef = useRef(config);
   const stageRef = useRef(stage);
   const resultRef = useRef<SimResult | null>(null);
@@ -693,6 +794,15 @@ export default function Home() {
   useEffect(() => { configRef.current = config; }, [config]);
   useEffect(() => { stageRef.current = stage; }, [stage]);
   useEffect(() => { resultRef.current = result; }, [result]);
+  useEffect(() => { historyRef.current = history; }, [history]);
+
+  useEffect(() => {
+    let active = true;
+    readSimulationHistory()
+      .then((entries) => { if (active) setHistory(entries); })
+      .catch(() => { if (active) setStatus("Simulation history is unavailable in this browser."); });
+    return () => { active = false; };
+  }, []);
 
   const derived = useMemo(() => {
     const omega = (config.rpm * Math.PI * 2) / 60;
@@ -708,6 +818,17 @@ export default function Home() {
       biteMm,
     };
   }, [config]);
+
+  const metricDelta = (key: keyof MetricSnapshot, unit: string, digits: number) => {
+    if (stage !== "result" || !metricDeltas) return null;
+    const rounded = Number(metricDeltas[key].toFixed(digits));
+    if (rounded === 0) return null;
+    const sign = rounded > 0 ? "+" : "−";
+    return `${sign}${Math.abs(rounded).toLocaleString(undefined, {
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    })}${unit ? ` ${unit}` : ""}`;
+  };
 
   const patchConfig = useCallback(<K extends keyof WeaponConfig>(key: K, value: WeaponConfig[K]) => {
     setConfig((previous) => ({ ...previous, [key]: value }));
@@ -1032,6 +1153,7 @@ export default function Home() {
         file.name,
         `${triangles.toLocaleString()} triangles · ${sizeLabel} · ${normalized.note}`,
       );
+      armorSourceRef.current = { kind: "stl", buffer: buffer.slice(0) };
     } catch {
       setMeshStatus("Could not read this STL");
       setStatus("Try a binary or ASCII STL containing a closed solid.");
@@ -1041,6 +1163,7 @@ export default function Home() {
   }, [replaceArmorGeometry]);
 
   const restoreDemo = useCallback(() => {
+    armorSourceRef.current = { kind: "demo" };
     replaceArmorGeometry(makeDemoPlateGeometry(), "Demo wedge plate", "250 mm wide × 30 mm thick · 45° half-height ramp");
   }, [replaceArmorGeometry]);
 
@@ -1283,13 +1406,102 @@ export default function Home() {
       setStatus("Enter a positive RPM, radius, and closing speed.");
       return;
     }
+    const metrics: MetricSnapshot = {
+      rpm: config.rpm,
+      tipMps: derived.tipMps,
+      closingSpeed: config.closingSpeed,
+      energy: derived.energy,
+      biteMm: derived.biteMm,
+      pathLength: nextResult.pathLength,
+    };
+    const previousRun = historyRef.current[0];
+    setMetricDeltas(previousRun ? {
+      rpm: metrics.rpm - previousRun.metrics.rpm,
+      tipMps: metrics.tipMps - previousRun.metrics.tipMps,
+      closingSpeed: metrics.closingSpeed - previousRun.metrics.closingSpeed,
+      energy: metrics.energy - previousRun.metrics.energy,
+      biteMm: metrics.biteMm - previousRun.metrics.biteMm,
+      pathLength: metrics.pathLength - previousRun.metrics.pathLength,
+    } : null);
+    const armorSource = armorSourceRef.current.kind === "stl"
+      ? { kind: "stl" as const, buffer: armorSourceRef.current.buffer.slice(0) }
+      : { kind: "demo" as const };
+    const historyEntry: HistoryEntry = {
+      id: typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      createdAt: Date.now(),
+      config: { ...config },
+      armorTransform: { ...armorTransform },
+      armorName,
+      meshStatus,
+      armorSource,
+      distanceOffset,
+      metrics,
+      hit: nextResult.hit,
+    };
+    const nextHistory = [historyEntry, ...historyRef.current];
+    historyRef.current = nextHistory;
+    setHistory(nextHistory);
+    void writeHistoryEntry(historyEntry).catch(() => {
+      setStatus("Simulation ran, but browser storage could not save this history entry.");
+    });
     setResult(nextResult);
     resultRef.current = nextResult;
     setStage("running");
     const duration = clamp(3.6 + nextResult.physicsDuration * 5, 3.8, 7.2);
     playbackRef.current = { active: true, started: performance.now(), duration, lastIndex: -1 };
     setStatus(nextResult.hit ? "First tooth acquired. Tracking through armor…" : "Running geometric pass…");
-  }, [calculateSimulation, setTracerGeometry]);
+  }, [armorName, armorTransform, calculateSimulation, config, derived, distanceOffset, meshStatus, setTracerGeometry]);
+
+  const loadHistoryEntry = useCallback((entry: HistoryEntry) => {
+    try {
+      playbackRef.current.active = false;
+      setStage("editor");
+      setResult(null);
+      setMetricDeltas(null);
+      setLivePathLength(0);
+      setTracerGeometry([]);
+      const geometry = entry.armorSource.kind === "demo"
+        ? makeDemoPlateGeometry()
+        : new STLLoader().parse(entry.armorSource.buffer.slice(0));
+      if (entry.armorSource.kind === "stl") normalizeStlUnitsToMillimeters(geometry);
+      armorSourceRef.current = entry.armorSource.kind === "stl"
+        ? { kind: "stl", buffer: entry.armorSource.buffer.slice(0) }
+        : { kind: "demo" };
+      replaceArmorGeometry(geometry, entry.armorName, entry.meshStatus);
+      setArmorTransform({ ...entry.armorTransform });
+      setConfig({ ...entry.config });
+      setDistanceOffset(entry.distanceOffset);
+      setRightTab("setup");
+      setStatus(`Loaded simulation from ${new Date(entry.createdAt).toLocaleString()}. Adjust it or run again.`);
+      requestAnimationFrame(() => {
+        const state = threeRef.current;
+        if (state) frameObjects(state, [state.armorRoot, state.spinner, state.directionArrow]);
+      });
+    } catch {
+      setStatus("This history entry could not restore its saved STL.");
+    }
+  }, [replaceArmorGeometry, setTracerGeometry]);
+
+  const deleteHistoryEntry = useCallback((id: string) => {
+    const nextHistory = historyRef.current.filter((entry) => entry.id !== id);
+    historyRef.current = nextHistory;
+    setHistory(nextHistory);
+    void removeHistoryEntry(id).catch(() => {
+      setStatus("The history entry was removed from this view but could not be deleted from browser storage.");
+    });
+  }, []);
+
+  const clearSimulationHistory = useCallback(() => {
+    if (!window.confirm("Delete the entire simulation history stored in this browser?")) return;
+    historyRef.current = [];
+    setHistory([]);
+    setMetricDeltas(null);
+    void removeAllHistory().catch(() => {
+      setStatus("History was cleared from this view but browser storage could not be emptied.");
+    });
+  }, []);
 
   const replay = useCallback(() => {
     if (!result) return;
@@ -1336,12 +1548,12 @@ export default function Home() {
       </header>
 
       <section className="metric-rail" aria-label="Live calculated metrics">
-        <Metric label="RPM" value={Math.round(config.rpm).toLocaleString()} />
-        <Metric label="TIP SPEED" value={`${derived.tipMps.toFixed(1)} m/s`} />
-        <Metric label="CLOSING SPEED" value={`${config.closingSpeed.toFixed(1)} m/s`} />
-        <Metric label="STORED ENERGY" value={`${derived.energy.toLocaleString(undefined, { maximumFractionDigits: 0 })} J`} />
-        <Metric label="THEORETICAL MAXIMUM BITE DEPTH" value={`${derived.biteMm.toFixed(1)} mm`} />
-        <Metric label="IMPACT PATH" value={`${livePathLength.toFixed(1)} mm`} accent />
+        <Metric label="RPM" value={Math.round(config.rpm).toLocaleString()} delta={metricDelta("rpm", "", 0)} />
+        <Metric label="TIP SPEED" value={`${derived.tipMps.toFixed(1)} m/s`} delta={metricDelta("tipMps", "m/s", 1)} />
+        <Metric label="CLOSING SPEED" value={`${config.closingSpeed.toFixed(1)} m/s`} delta={metricDelta("closingSpeed", "m/s", 1)} />
+        <Metric label="STORED ENERGY" value={`${derived.energy.toLocaleString(undefined, { maximumFractionDigits: 0 })} J`} delta={metricDelta("energy", "J", 0)} />
+        <Metric label="THEORETICAL MAXIMUM BITE DEPTH" value={`${derived.biteMm.toFixed(1)} mm`} delta={metricDelta("biteMm", "mm", 1)} />
+        <Metric label="IMPACT PATH" value={`${livePathLength.toFixed(1)} mm`} delta={metricDelta("pathLength", "mm", 1)} />
       </section>
 
       <div className="workspace">
@@ -1423,12 +1635,18 @@ export default function Home() {
           <div className="status-console"><span>&gt;_</span>{status}</div>
         </section>
 
-        <aside className={`control-panel right-panel ${stage !== "editor" ? "panel-locked" : ""}`}>
+        <aside className="control-panel right-panel">
           <div className="panel-heading">
             <span>02</span>
             <div><p>WEAPON SYSTEM</p><h2>Spinner setup</h2></div>
           </div>
 
+          <div className="panel-tabs" role="tablist" aria-label="Weapon panel view">
+            <button role="tab" aria-selected={rightTab === "setup"} className={rightTab === "setup" ? "active" : ""} onClick={() => setRightTab("setup")}>Setup</button>
+            <button role="tab" aria-selected={rightTab === "history"} className={rightTab === "history" ? "active" : ""} onClick={() => setRightTab("history")}>History <span>{history.length}</span></button>
+          </div>
+
+          {rightTab === "setup" ? <fieldset className="setup-panel-content" disabled={stage !== "editor"}>
           <div className="segmented">
             <button className={config.spinPlane === "horizontal" ? "active" : ""} onClick={() => patchConfig("spinPlane", "horizontal")} disabled={stage !== "editor"}>Horizontal</button>
             <button className={config.spinPlane === "vertical" ? "active" : ""} onClick={() => patchConfig("spinPlane", "vertical")} disabled={stage !== "editor"}>Vertical</button>
@@ -1492,6 +1710,46 @@ export default function Home() {
             <span>▶</span> Run bite simulation
           </button>
           <p className="disclaimer">GEOMETRIC VISUALIZATION ONLY · NO FORCE OR PENETRATION MODEL</p>
+          </fieldset> : (
+            <section className="history-panel" role="tabpanel">
+              <div className="history-toolbar">
+                <div>
+                  <strong>Simulation history</strong>
+                  <span>Saved in this browser</span>
+                </div>
+                <button onClick={clearSimulationHistory} disabled={!history.length}>Delete all</button>
+              </div>
+              {!history.length ? (
+                <div className="history-empty">
+                  <span>◇</span>
+                  <strong>No recorded simulations</strong>
+                  <p>Completed runs will appear here for comparison and reloading.</p>
+                </div>
+              ) : (
+                <div className="history-list">
+                  {history.map((entry, index) => (
+                    <article className="history-entry" key={entry.id}>
+                      <div className="history-entry-top">
+                        <span>RUN {history.length - index}</span>
+                        <time dateTime={new Date(entry.createdAt).toISOString()}>{new Date(entry.createdAt).toLocaleString()}</time>
+                      </div>
+                      <strong title={entry.armorName}>{entry.armorName}</strong>
+                      <div className="history-metrics">
+                        <span>PATH <b>{entry.metrics.pathLength.toFixed(1)} mm</b></span>
+                        <span>BITE <b>{entry.metrics.biteMm.toFixed(1)} mm</b></span>
+                        <span>RPM <b>{Math.round(entry.metrics.rpm).toLocaleString()}</b></span>
+                        <span>ENERGY <b>{entry.metrics.energy.toLocaleString(undefined, { maximumFractionDigits: 0 })} J</b></span>
+                      </div>
+                      <div className="history-actions">
+                        <button onClick={() => loadHistoryEntry(entry)}>Reload configuration</button>
+                        <button className="delete" onClick={() => deleteHistoryEntry(entry.id)} aria-label={`Delete simulation from ${new Date(entry.createdAt).toLocaleString()}`}>Delete</button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
         </aside>
       </div>
     </main>
