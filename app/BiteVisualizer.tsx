@@ -124,21 +124,21 @@ function normalizeStlUnitsToMillimeters(geometry: THREE.BufferGeometry) {
   return { size: rawSize, note: "STL units treated as mm" };
 }
 
-function makeWedgeGeometry() {
-  const vertices = new Float32Array([
-    -70, -75, 0, -70, 75, 0, 90, -75, 0, 90, 75, 0,
-    90, -75, 68, 90, 75, 68,
-  ]);
-  const indices = [
-    0, 2, 1, 1, 2, 3,
-    2, 4, 3, 3, 4, 5,
-    0, 1, 4, 1, 5, 4,
-    0, 4, 2,
-    1, 3, 5,
-  ];
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
-  geometry.setIndex(indices);
+function makeDemoPlateGeometry() {
+  // A representative 10 mm armor plate: 250 mm across, 140 mm tall, and
+  // inclined 30 degrees from vertical. Keep its lower edge on the XY floor.
+  const thickness = 10;
+  const width = 250;
+  const height = 140;
+  const incline = -30 * DEG;
+  const geometry = new THREE.BoxGeometry(thickness, width, height);
+  geometry.translate(0, 0, height / 2);
+  geometry.rotateY(incline);
+
+  // Rotating around the lower-edge center can place one corner below Z=0;
+  // lift the finished solid so the entire plate rests on the floor plane.
+  geometry.computeBoundingBox();
+  geometry.translate(0, 0, -(geometry.boundingBox?.min.z ?? 0));
   geometry.computeVertexNormals();
   geometry.computeBoundingBox();
   return geometry;
@@ -561,7 +561,7 @@ export default function Home() {
   const [armorTransform, setArmorTransform] = useState<ArmorTransform>(DEFAULT_ARMOR);
   const [stage, setStage] = useState<Stage>("editor");
   const [editorTool, setEditorTool] = useState<EditorTool>("orbit");
-  const [armorName, setArmorName] = useState("Demo wedge");
+  const [armorName, setArmorName] = useState("Demo angled plate");
   const [meshStatus, setMeshStatus] = useState("Demo solid loaded");
   const [livePathLength, setLivePathLength] = useState(0);
   const [result, setResult] = useState<SimResult | null>(null);
@@ -686,7 +686,7 @@ export default function Home() {
     rim.position.set(120, 180, 180);
     scene.add(rim);
 
-    const armorBuilt = buildArmorObject(makeWedgeGeometry());
+    const armorBuilt = buildArmorObject(makeDemoPlateGeometry());
     scene.add(armorBuilt.root);
     const spinner = createSpinner(configRef.current);
     scene.add(spinner);
@@ -931,7 +931,7 @@ export default function Home() {
   }, [replaceArmorGeometry]);
 
   const restoreDemo = useCallback(() => {
-    replaceArmorGeometry(makeWedgeGeometry(), "Demo wedge", "Demo solid loaded");
+    replaceArmorGeometry(makeDemoPlateGeometry(), "Demo angled plate", "250 × 140 × 10 mm · 30° incline");
   }, [replaceArmorGeometry]);
 
   const frameScene = useCallback(() => {
