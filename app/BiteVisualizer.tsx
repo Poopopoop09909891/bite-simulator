@@ -92,7 +92,9 @@ const DEFAULT_WEAPON: WeaponConfig = {
 };
 
 const DEFAULT_ARMOR: ArmorTransform = { x: 20, y: 0, z: 0, rx: 0, ry: 0, rz: 0 };
-const TOOTH_ROD_RADIUS = 3;
+// The tooth is treated as an effectively sharp blade at the configured
+// weapon radius. Its glow supplies visibility without adding bulky geometry.
+const TOOTH_ROD_RADIUS = 0.25;
 const DEG = Math.PI / 180;
 
 // Accelerate repeated inside/outside tests on uploaded meshes.
