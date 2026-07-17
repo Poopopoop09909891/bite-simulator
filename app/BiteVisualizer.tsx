@@ -1291,7 +1291,7 @@ export default function Home() {
 
           <div className="formula-card">
             <div><span>BITE</span><strong>{derived.biteMm.toFixed(2)} mm</strong></div>
-            <p>Distance advanced between successive tooth arrivals.</p>
+            <p>Theoretical maximum assuming the armor intrudes into the weapon circle just as a tooth passes.</p>
           </div>
 
           <button className="primary-action" onClick={runSimulation} disabled={stage !== "editor"}>
