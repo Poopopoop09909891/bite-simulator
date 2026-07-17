@@ -1661,6 +1661,7 @@ export default function Home() {
             <NumberField label="Moment of inertia" value={config.momentOfInertia} onChange={(v) => patchConfig("momentOfInertia", clamp(v, 0.0001, 100))} min={0.0001} step={0.001} unit="kg·m²" />
             <NumberField label="Starting phase" value={config.phase} onChange={(v) => patchConfig("phase", v % 360)} step={1} unit="°" />
             <NumberField label="Move direction" value={config.moveDirection} onChange={(v) => patchConfig("moveDirection", v % 360)} step={1} unit="°" />
+            <p className="input-commit-note">↵ Press Enter to apply field changes</p>
           </div>
 
           <div className="spin-toggle">
