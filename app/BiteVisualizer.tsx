@@ -126,11 +126,11 @@ function normalizeStlUnitsToMillimeters(geometry: THREE.BufferGeometry) {
 
 function makeDemoPlateGeometry() {
   // A representative 10 mm armor plate: 250 mm across, 140 mm tall, and
-  // inclined 30 degrees from vertical. Keep its lower edge on the XY floor.
+  // inclined 45 degrees from vertical. Keep its lower edge on the XY floor.
   const thickness = 10;
   const width = 250;
   const height = 140;
-  const incline = -30 * DEG;
+  const incline = 45 * DEG;
   const geometry = new THREE.BoxGeometry(thickness, width, height);
   geometry.translate(0, 0, height / 2);
   geometry.rotateY(incline);
@@ -931,7 +931,7 @@ export default function Home() {
   }, [replaceArmorGeometry]);
 
   const restoreDemo = useCallback(() => {
-    replaceArmorGeometry(makeDemoPlateGeometry(), "Demo angled plate", "250 × 140 × 10 mm · 30° incline");
+    replaceArmorGeometry(makeDemoPlateGeometry(), "Demo angled plate", "250 × 140 × 10 mm · 45° incline");
   }, [replaceArmorGeometry]);
 
   const frameScene = useCallback(() => {
