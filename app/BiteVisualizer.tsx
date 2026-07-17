@@ -144,6 +144,115 @@ function makeDemoPlateGeometry() {
   return geometry;
 }
 
+function normalizeDegrees(value: number) {
+  return ((value % 360) + 360) % 360;
+}
+
+function closestPointOnSegment(point: THREE.Vector3, start: THREE.Vector3, end: THREE.Vector3) {
+  const delta = end.clone().sub(start);
+  const denominator = delta.lengthSq();
+  if (denominator < 1e-12) return start.clone();
+  const t = clamp(point.clone().sub(start).dot(delta) / denominator, 0, 1);
+  return start.clone().addScaledVector(delta, t);
+}
+
+function clipSegmentToZRange(start: THREE.Vector3, end: THREE.Vector3, minZ: number, maxZ: number) {
+  let low = 0;
+  let high = 1;
+  const dz = end.z - start.z;
+  if (Math.abs(dz) < 1e-9) {
+    return start.z >= minZ && start.z <= maxZ ? [start.clone(), end.clone()] as const : null;
+  }
+  const tMin = (minZ - start.z) / dz;
+  const tMax = (maxZ - start.z) / dz;
+  low = Math.max(low, Math.min(tMin, tMax));
+  high = Math.min(high, Math.max(tMin, tMax));
+  if (low > high) return null;
+  const delta = end.clone().sub(start);
+  return [
+    start.clone().addScaledVector(delta, low),
+    start.clone().addScaledVector(delta, high),
+  ] as const;
+}
+
+/** Find the nearest point on the STL's intersection with the spinner plane. */
+function nearestPointOnArmorSlice(
+  mesh: THREE.Mesh,
+  plane: THREE.Plane,
+  reference: THREE.Vector3,
+  zRange?: { min: number; max: number },
+) {
+  const geometry = mesh.geometry;
+  const positions = geometry.getAttribute("position");
+  if (!positions) return null;
+  const index = geometry.index;
+  const vertex = (positionIndex: number) => new THREE.Vector3(
+    positions.getX(positionIndex),
+    positions.getY(positionIndex),
+    positions.getZ(positionIndex),
+  ).applyMatrix4(mesh.matrixWorld);
+  const triangleCount = Math.floor((index?.count ?? positions.count) / 3);
+  const epsilon = 1e-5;
+  let nearest: THREE.Vector3 | null = null;
+  let nearestDistanceSq = Infinity;
+
+  const consider = (candidate: THREE.Vector3) => {
+    if (zRange && (candidate.z < zRange.min - epsilon || candidate.z > zRange.max + epsilon)) return;
+    const distanceSq = candidate.distanceToSquared(reference);
+    if (distanceSq < nearestDistanceSq) {
+      nearestDistanceSq = distanceSq;
+      nearest = candidate.clone();
+    }
+  };
+
+  const considerSegment = (rawStart: THREE.Vector3, rawEnd: THREE.Vector3) => {
+    const segment = zRange
+      ? clipSegmentToZRange(rawStart, rawEnd, zRange.min, zRange.max)
+      : [rawStart, rawEnd] as const;
+    if (!segment) return;
+    consider(closestPointOnSegment(reference, segment[0], segment[1]));
+  };
+
+  for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex += 1) {
+    const indices = [0, 1, 2].map((corner) => {
+      const offset = triangleIndex * 3 + corner;
+      return index ? index.getX(offset) : offset;
+    });
+    const vertices = indices.map(vertex);
+    const distances = vertices.map((point) => plane.distanceToPoint(point));
+    const coplanar = distances.every((distance) => Math.abs(distance) <= epsilon);
+    if (coplanar) {
+      considerSegment(vertices[0], vertices[1]);
+      considerSegment(vertices[1], vertices[2]);
+      considerSegment(vertices[2], vertices[0]);
+      continue;
+    }
+
+    const intersections: THREE.Vector3[] = [];
+    const addUnique = (point: THREE.Vector3) => {
+      if (!intersections.some((other) => other.distanceToSquared(point) < epsilon * epsilon)) {
+        intersections.push(point);
+      }
+    };
+    for (let edge = 0; edge < 3; edge += 1) {
+      const next = (edge + 1) % 3;
+      const start = vertices[edge];
+      const end = vertices[next];
+      const startDistance = distances[edge];
+      const endDistance = distances[next];
+      if (Math.abs(startDistance) <= epsilon) addUnique(start);
+      if (startDistance * endDistance < -epsilon * epsilon) {
+        const t = startDistance / (startDistance - endDistance);
+        addUnique(start.clone().lerp(end, t));
+      }
+    }
+    if (intersections.length === 1) consider(intersections[0]);
+    else if (intersections.length >= 2) considerSegment(intersections[0], intersections[1]);
+  }
+
+  return nearest;
+}
+
 function baseQuaternion(config: WeaponConfig) {
   if (config.spinPlane === "horizontal") return new THREE.Quaternion();
   const heading = config.moveDirection * DEG;
@@ -566,6 +675,7 @@ export default function Home() {
   const [livePathLength, setLivePathLength] = useState(0);
   const [result, setResult] = useState<SimResult | null>(null);
   const [status, setStatus] = useState("Position the scene, then arm the simulation.");
+  const [distanceOffset, setDistanceOffset] = useState(0);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -941,6 +1051,69 @@ export default function Home() {
     setStatus("Camera framed around both the armor and spinner.");
   }, []);
 
+  const runMaximumBiteAssist = useCallback((offset = distanceOffset) => {
+    const state = threeRef.current;
+    if (!state || stageRef.current !== "editor") return;
+    const current = configRef.current;
+    const center = new THREE.Vector3(current.startX, current.startY, current.startZ);
+    state.armorRoot.updateMatrixWorld(true);
+    state.armorMesh.updateMatrixWorld(true);
+
+    let plane: THREE.Plane;
+    let zRange: { min: number; max: number } | undefined;
+    if (current.spinPlane === "horizontal") {
+      plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -current.startZ);
+    } else {
+      const heading = current.moveDirection * DEG;
+      const lateral = new THREE.Vector3(-Math.sin(heading), Math.cos(heading), 0);
+      plane = new THREE.Plane().setFromNormalAndCoplanarPoint(lateral, center);
+      zRange = { min: current.startZ - current.radius, max: current.startZ + current.radius };
+    }
+
+    const contact = nearestPointOnArmorSlice(state.armorMesh, plane, center, zRange);
+    if (!contact) {
+      setStatus("Maximum bite assist could not find armor on the spinner's middle plane. Adjust the spinner height or orientation.");
+      return;
+    }
+
+    const towardArmor = new THREE.Vector2(contact.x - center.x, contact.y - center.y);
+    if (towardArmor.lengthSq() < 1e-9) {
+      setStatus("Maximum bite assist needs the spinner center to be laterally separated from the armor.");
+      return;
+    }
+    towardArmor.normalize();
+    const moveDirection = normalizeDegrees(Math.atan2(towardArmor.y, towardArmor.x) / DEG);
+    let phase = moveDirection;
+    let horizontalReach = current.radius;
+
+    if (current.spinPlane === "vertical") {
+      const verticalReach = contact.z - current.startZ;
+      if (Math.abs(verticalReach) > current.radius + 1e-5) {
+        setStatus("Maximum bite assist found armor outside the vertical spinner's radius. Adjust spinner Z and try again.");
+        return;
+      }
+      horizontalReach = Math.sqrt(Math.max(0, current.radius ** 2 - verticalReach ** 2));
+      phase = normalizeDegrees(Math.atan2(verticalReach, horizontalReach) / DEG);
+    }
+
+    // Positive offset backs the spinner away from the established contact;
+    // negative values intentionally advance it into the armor.
+    const approachDistance = horizontalReach + offset;
+    const startX = contact.x - towardArmor.x * approachDistance;
+    const startY = contact.y - towardArmor.y * approachDistance;
+    setDistanceOffset(offset);
+    setConfig((previous) => ({
+      ...previous,
+      phase: Number(phase.toFixed(3)),
+      moveDirection: Number(moveDirection.toFixed(3)),
+      startX: Number(startX.toFixed(3)),
+      startY: Number(startY.toFixed(3)),
+    }));
+    setStatus(
+      `Maximum bite aligned at (${contact.x.toFixed(1)}, ${contact.y.toFixed(1)}, ${contact.z.toFixed(1)}) mm · ${offset >= 0 ? offset.toFixed(1) : `−${Math.abs(offset).toFixed(1)}`} mm offset.`,
+    );
+  }, [distanceOffset]);
+
   const calculateSimulation = useCallback((): SimResult | null => {
     const state = threeRef.current;
     if (!state || config.rpm <= 0 || config.closingSpeed <= 0 || config.radius <= 0) return null;
@@ -1288,6 +1461,27 @@ export default function Home() {
               <NumberField label="Z" value={config.startZ} onChange={(v) => patchConfig("startZ", v)} />
             </div>
           </div>
+
+          <section className="bite-assist" aria-labelledby="bite-assist-title">
+            <div className="bite-assist-heading">
+              <span>⌁</span>
+              <div>
+                <p>POSITIONING TOOL</p>
+                <h3 id="bite-assist-title">Maximum bite assist</h3>
+              </div>
+            </div>
+            <NumberField
+              label="Distance offset"
+              value={distanceOffset}
+              onChange={(value) => runMaximumBiteAssist(value)}
+              step={1}
+              unit="mm"
+            />
+            <p className="bite-assist-tip">Use to prevent premature overlap. Positive values move the spinner backward along its path.</p>
+            <button className="assist-action" onClick={() => runMaximumBiteAssist()} disabled={stage !== "editor"}>
+              Align for maximum bite
+            </button>
+          </section>
 
           <div className="formula-card">
             <div><span>BITE</span><strong>{derived.biteMm.toFixed(2)} mm</strong></div>
