@@ -1584,6 +1584,7 @@ export default function Home() {
             <p>This visualizer does not include a force model.</p>
             <p>In a real engagement with a sloped armor panel made from hardened steel or titanium, a longer engagement path can produce a larger accumulated reaction impulse. That impulse tends to deflect the weapon away from the wedge.</p>
             <p>Weapon setups that produce very long paths here are therefore more likely to disengage before completing the simulated path in real life. Minimizing path length increases the likelihood of effective penetration.</p>
+            <p>However, a spinner with deep bite and a short impact path can still be deflected when the armor plate is sufficiently robust or the weapon has insufficient stored energy. A favorable geometric result is not a guarantee of penetration.</p>
             <button className="info-modal-action" onClick={() => setShowImpactInfo(false)}>Understood</button>
           </section>
         </div>
