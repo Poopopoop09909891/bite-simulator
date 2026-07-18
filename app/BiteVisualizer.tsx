@@ -745,14 +745,19 @@ function Metric({
   label,
   value,
   delta,
+  onInfo,
 }: {
   label: string;
   value: string;
   delta?: string | null;
+  onInfo?: () => void;
 }) {
   return (
     <div className={`metric ${label === "IMPACT PATH" ? "metric-accent" : ""}`}>
-      <span>{label}</span>
+      <div className="metric-label">
+        <span>{label}</span>
+        {onInfo && <button className="metric-info" onClick={onInfo} aria-label={`About ${label.toLowerCase()}`}>i</button>}
+      </div>
       <div className="metric-value">
         <strong>{value}</strong>
         {delta && <em className={delta.startsWith("+") ? "delta-up" : "delta-down"}>{delta}</em>}
@@ -775,6 +780,7 @@ export default function Home() {
   const [rightTab, setRightTab] = useState<"setup" | "history">("setup");
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [metricDeltas, setMetricDeltas] = useState<MetricDeltas | null>(null);
+  const [showImpactInfo, setShowImpactInfo] = useState(false);
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -795,6 +801,15 @@ export default function Home() {
   useEffect(() => { stageRef.current = stage; }, [stage]);
   useEffect(() => { resultRef.current = result; }, [result]);
   useEffect(() => { historyRef.current = history; }, [history]);
+
+  useEffect(() => {
+    if (!showImpactInfo) return;
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setShowImpactInfo(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [showImpactInfo]);
 
   useEffect(() => {
     let active = true;
@@ -1553,8 +1568,26 @@ export default function Home() {
         <Metric label="CLOSING SPEED" value={`${config.closingSpeed.toFixed(1)} m/s`} delta={metricDelta("closingSpeed", "m/s", 1)} />
         <Metric label="STORED ENERGY" value={`${derived.energy.toLocaleString(undefined, { maximumFractionDigits: 0 })} J`} delta={metricDelta("energy", "J", 0)} />
         <Metric label="THEORETICAL MAXIMUM BITE DEPTH" value={`${derived.biteMm.toFixed(1)} mm`} delta={metricDelta("biteMm", "mm", 1)} />
-        <Metric label="IMPACT PATH" value={`${livePathLength.toFixed(1)} mm`} delta={metricDelta("pathLength", "mm", 1)} />
+        <Metric label="IMPACT PATH" value={`${livePathLength.toFixed(1)} mm`} delta={metricDelta("pathLength", "mm", 1)} onInfo={() => setShowImpactInfo(true)} />
       </section>
+
+      {showImpactInfo && (
+        <div
+          className="info-modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) setShowImpactInfo(false); }}
+        >
+          <section className="info-modal" role="dialog" aria-modal="true" aria-labelledby="impact-info-title">
+            <button className="info-modal-close" onClick={() => setShowImpactInfo(false)} aria-label="Close impact path information" autoFocus>×</button>
+            <p className="info-modal-kicker">GEOMETRIC MODEL LIMITATION</p>
+            <h2 id="impact-info-title">What impact path means in practice</h2>
+            <p>This visualizer does not include a force model.</p>
+            <p>In a real engagement with a sloped armor panel made from hardened steel or titanium, a longer engagement path can produce a larger accumulated reaction impulse. That impulse tends to deflect the weapon away from the wedge.</p>
+            <p>Weapon setups that produce very long paths here are therefore more likely to disengage before completing the simulated path in real life. Minimizing path length increases the likelihood of effective penetration.</p>
+            <button className="info-modal-action" onClick={() => setShowImpactInfo(false)}>Understood</button>
+          </section>
+        </div>
+      )}
 
       <div className="workspace">
         <aside className={`control-panel left-panel ${stage !== "editor" ? "panel-locked" : ""}`}>
